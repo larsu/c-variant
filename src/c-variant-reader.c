@@ -877,10 +877,12 @@ _public_ int c_variant_exit(CVariant *cv, const char *containers) {
  *                  on the stack, and pass it as 'char**' to this function,
  *                  which will update the pointer. Note that *any* returned
  *                  string is *always* 0 terminated!
- *  - variants: For every variant you specify, you must provide a type string
- *              in @args. If it is NULL, the variant is simply skipped.
- *              Otherwise, the variant is entered (expecting it to have the
- *              specified type) and each value is read recursively.
+ *  - variants: For every variant, you must provide a pointer to an
+ *              uninitialized CVariant *, which will be filled with
+ *              c_variant_new(). This data underlying the returned
+ *              variant is shared. It is only valid as long as the
+ *              surrounding variant is valid. If you give NULL, the
+ *              variant is skipped.
  *  - maybe: For every maybe you specify, you must provide a boolean in @args
  *           that specifies whether you expect the maybe to be empty (false),
  *           or valid (true). If it is valid, this will enter the maybe and
@@ -895,19 +897,16 @@ _public_ int c_variant_exit(CVariant *cv, const char *containers) {
  *
  * Example:
  *      unsigned int u1, u2, u3, u4;
- *      const char *key1, *key2;
+ *      const char *s1, *s2;
+ *      CVariant *child;
  *
- *      r = c_variant_read(cv, "(uua(sv))",
+ *      r = c_variant_read(cv, "(uuasv)",
  *                         &u1,         // read first 'u'
  *                         &u2,         // read second 'u'
  *                         2,           // read 2 array entries
- *                         &key1,       // read 's' of first array entry
- *                         "mu",        // type of 'v' of first array entry
- *                         true,        // expect maybe to be non-empty
- *                         &u4,         // read 'mu' of first array entry
- *                         &key2,       // read 's' of second array entry
- *                         "u",         // type of 'v' of second array entry
- *                         &u4);        // read 'u' of second array entry
+ *                         &s1,         // read 's' of first array entry
+ *                         &s2,         // read 's' of second array entry
+ *                         &child);     // read 'v'
  *
  * It is an programming error to call this on an unsealed variant or
  * with a @signature that does not match the type of @cv.
@@ -916,9 +915,11 @@ _public_ int c_variant_exit(CVariant *cv, const char *containers) {
  */
 _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) {
         CVariantVarg varg;
-        const char *arg_s;
         void *arg;
         int arg_i;
+        CVariant **arg_v;
+        CVariant **arg_vs[C_VARIANT_MAX_VARG];
+        size_t n_arg_vs = 0;
         int r, c;
 
         assert(cv && cv->sealed);
@@ -937,19 +938,37 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
                 case C_VARIANT_VARIANT:
                         r = c_variant_enter_one(cv, c);
                         if (r < 0)
-                                return r;
+                                goto out;
 
-                        arg_s = va_arg(args, const char *);
-                        if (arg_s)
-                                c_variant_varg_push(&varg, arg_s, strlen(arg_s), -1);
-                        else
-                                c_variant_exit_one(cv);
+                        arg_v = va_arg(args, CVariant **);
+                        if (arg_v) {
+                                CVariantLevel *level;
+                                CVariantType info;
+                                size_t size, end;
+                                void *data;
+
+                                level = cv->state->levels + cv->state->i_levels;
+
+                                r = c_variant_peek(cv, level->type[0], &info, &size, &end, NULL);
+                                if (r < 0)
+                                        goto out;
+
+                                data = (char *)cv->vecs[level->v_front].iov_base + level->i_front;
+
+                                r = c_variant_new_from_buffer(arg_v, level->type, level->n_type, data, size);
+                                if (r < 0)
+                                        goto out;
+
+                                arg_vs[n_arg_vs++] = arg_v;
+                        }
+
+                        c_variant_exit_one(cv);
                         break;
                 case C_VARIANT_MAYBE:
                 case C_VARIANT_ARRAY:
                         r = c_variant_enter_one(cv, c);
                         if (r < 0)
-                                return r;
+                                goto out;
 
                         /* bool in varargs becomes int */
                         arg_i = va_arg(args, int);
@@ -959,7 +978,7 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
                 case C_VARIANT_PAIR_OPEN:
                         r = c_variant_enter_one(cv, c);
                         if (r < 0)
-                                return r;
+                                goto out;
 
                         if (c == C_VARIANT_TUPLE_OPEN)
                                 c_variant_varg_enter_unbound(&varg, cv, C_VARIANT_TUPLE_CLOSE);
@@ -982,14 +1001,23 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
                         arg = va_arg(args, void *);
                         r = c_variant_read_one(cv, c, arg);
                         if (r < 0)
-                                return r;
+                                goto out;
                         break;
                 default:
-                        return c_variant_poison(cv, -EMEDIUMTYPE);
+                        r = c_variant_poison(cv, -EMEDIUMTYPE);
+                        goto out;
                 }
         }
 
-        return 0;
+out:
+        if (r < 0) {
+                size_t i;
+
+                for (i = 0; i < n_arg_vs; i++)
+                        *arg_vs[i] = c_variant_free(*arg_vs[i]);
+        }
+
+        return r;
 }
 
 /**

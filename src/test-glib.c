@@ -53,7 +53,7 @@
 static void test_generate(const char *type, CVariant **cvp, GVariant **gvp) {
         GVariantBuilder *builder;
         CVariantVarg varg;
-        CVariant *cv;
+        CVariant *cv, *child;
         GVariant *gv, *gvc;
         uint64_t val_64;
         size_t n;
@@ -86,7 +86,11 @@ static void test_generate(const char *type, CVariant **cvp, GVariant **gvp) {
                         g_variant_builder_close(builder);
                         break;
                 case C_VARIANT_VARIANT:
-                        c_variant_write(cv, "v", "u", (uint32_t)val_64);
+                        c_variant_new(&child, "u", 1);
+                        c_variant_write(child, "u", (uint32_t)val_64);
+                        c_variant_seal(child);
+                        c_variant_write(cv, "v", child);
+                        c_variant_free(child);
                         g_variant_builder_add(builder, "v",
                                               g_variant_new("u", (uint32_t)val_64));
                         break;

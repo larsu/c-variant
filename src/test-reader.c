@@ -29,10 +29,19 @@
 #include "c-variant.h"
 #include "c-variant-private.h"
 
+static void assert_variant_type(CVariant *cv, const char *expected_type) {
+        const char *type;
+        size_t len;
+
+        type = c_variant_peek_type(cv, &len);
+        assert(strncmp(type, expected_type, len) == 0);
+}
+
 static void test_reader_basic(void) {
         const char *type;
         unsigned int u1;
         CVariant *cv;
+        CVariant *child = NULL;
         int r;
 
         /* simple 'u' type */
@@ -116,9 +125,15 @@ static void test_reader_basic(void) {
         assert(r >= 0);
 
         u1 = 0;
-        r = c_variant_read(cv, "v", "u", &u1);
+        r = c_variant_read(cv, "v", &child);
+        assert(r >= 0);
+        assert(child != NULL);
+        assert_variant_type(child, "u");
+
+        r = c_variant_read(child, "u", &u1);
         assert(r >= 0);
         assert(u1 == 0x00ff00ff);
+        child = c_variant_free(child);
 
         cv = c_variant_free(cv);
 }

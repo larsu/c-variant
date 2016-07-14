@@ -410,7 +410,7 @@ static int c_variant_append(CVariant *cv,
         case C_VARIANT_ARRAY:
                 break;
         case C_VARIANT_MAYBE:
-                /* write maybe-marker for non-empty, dynamic maybes */
+               /* write maybe-marker for non-empty, dynamic maybes */
                 if (info->size < 1)
                         ++level->index;
                 /* fallthrough */
@@ -669,13 +669,21 @@ static int c_variant_write_one(CVariant *cv, char basic, const void *arg, size_t
         return 0;
 }
 
-static int c_variant_insert_one(CVariant *cv, const char *type, const struct iovec *vecs, size_t n_vecs, size_t size) {
+static int c_variant_insert_one(CVariant *cv, const char *type, const struct iovec *vecs, size_t n_vecs, bool free_data) {
         CVariantLevel *level;
+        size_t size;
         CVariantType info;
         size_t n_type, i, idx;
         struct iovec *v;
         uint64_t frame;
         int r;
+
+        size = 0;
+        for (i = 0; i < n_vecs; ++i) {
+                if (size + vecs[i].iov_len < size)
+                        return cv ? c_variant_poison(cv, -EFBIG) : -EFBIG;
+                size += vecs[i].iov_len;
+        }
 
         level = cv->state->levels + cv->state->i_levels;
         if (_unlikely_(level->n_type < 1))
@@ -710,11 +718,10 @@ static int c_variant_insert_one(CVariant *cv, const char *type, const struct iov
 
         for (i = 0; i < n_vecs; ++i) {
                 idx = level->v_front + i + 1;
-                if (((char *)(cv->vecs + cv->n_vecs))[idx]) {
-                        ((char *)(cv->vecs + cv->n_vecs))[idx] = false;
+                if (((char *)(cv->vecs + cv->n_vecs))[idx])
                         free((cv->vecs + idx)->iov_base);
-                }
                 cv->vecs[idx] = vecs[i];
+                ((char *)(cv->vecs + cv->n_vecs))[idx] = free_data;
         }
 
         level->v_front += n_vecs + 1;
@@ -937,6 +944,53 @@ _public_ int c_variant_end(CVariant *cv, const char *containers) {
         return 0;
 }
 
+static char *c_variant_get_type(CVariant *v) {
+        const char *type;
+        size_t len;
+
+        type = c_variant_peek_type(v, &len);
+
+        return strndup(type, len);
+}
+
+static int c_variant_insert_variant(CVariant *cv, CVariant *child) {
+        const struct iovec *vecs;
+        struct iovec *copy = NULL;
+        size_t i, n_vecs;
+        char *type = NULL;
+        int r = 0;
+
+        type = c_variant_get_type(child);
+        r = c_variant_begin(cv, "v", type);
+        if (r < 0)
+                goto out;
+
+        vecs = c_variant_get_vecs(child, &n_vecs);
+
+        copy = malloc(sizeof(struct iovec) * n_vecs);
+        for (i = 0; i < n_vecs; i++) {
+                size_t len;
+
+                len = vecs[i].iov_len;
+                copy[i].iov_len = len;
+                copy[i].iov_base = malloc(len);
+                memcpy(copy[i].iov_base, vecs[i].iov_base, len);
+        }
+
+        r = c_variant_insert_one(cv, type, copy, n_vecs, true);
+        if (r < 0)
+                goto out;
+
+        r = c_variant_end(cv, "v");
+        if (r < 0)
+                goto out;
+
+out:
+        free(type);
+        free(copy);
+        return r;
+}
+
 /**
  * c_variant_writev() - write data
  * @cv:         variant to operate on, or NULL
@@ -956,9 +1010,8 @@ _public_ int c_variant_end(CVariant *cv, const char *containers) {
  *                  byte variable directly as argument.
  *                  Any dynamic sized type (e.g., strings) must be provided as
  *                  pointer (must not be NULL).
- *   - variants: For every variant you specify, you must provide the type
- *               string in @args (must not be NULL). The variant is then
- *               entered and recursively written to.
+ *   - variants: For every variant you specify, you must provide a
+ *               sealed CVariant *. Passing NULL inserts an empty tuple.
  *   - maybe: For every maybe you specify, you must provide a boolean in @args
  *            which specifies whether the maybe should be entered, or whether
  *            it should be written empty.
@@ -983,6 +1036,7 @@ _public_ int c_variant_writev(CVariant *cv, const char *signature, va_list args)
         uint8_t arg_8;
         double arg_d;
         int arg_i;
+        CVariant *arg_v;
         int r, c;
 
         if (_unlikely_(!signature || !*signature))
@@ -1001,12 +1055,10 @@ _public_ int c_variant_writev(CVariant *cv, const char *signature, va_list args)
                         c_variant_end_one(cv);
                         break;
                 case C_VARIANT_VARIANT:
-                        arg_s = va_arg(args, const char *);
-                        r = c_variant_begin_one(cv, c, arg_s);
+                        arg_v = va_arg(args, CVariant *);
+                        r = c_variant_insert_variant(cv, arg_v);
                         if (r < 0)
                                 return r;
-
-                        c_variant_varg_push(&varg, arg_s, strlen(arg_s), -1);
                         break;
                 case C_VARIANT_MAYBE:
                 case C_VARIANT_ARRAY:
@@ -1106,24 +1158,13 @@ _public_ int c_variant_writev(CVariant *cv, const char *signature, va_list args)
  * Return: 0 on success, negative error code on failure.
  */
 _public_ int c_variant_insert(CVariant *cv, const char *type, const struct iovec *vecs, size_t n_vecs) {
-        size_t i, size;
-
-        size = 0;
-        for (i = 0; i < n_vecs; ++i) {
-                if (size + vecs[i].iov_len < size)
-                        return cv ? c_variant_poison(cv, -EFBIG) : -EFBIG;
-                size += vecs[i].iov_len;
-        }
-
         if (_unlikely_(!cv)) {
                 if (strcmp(type, "()"))
                         return -EBADRQC;
-                if (size != 1)
-                        return -ENOTUNIQ;
                 return 0;
         }
 
-        return c_variant_insert_one(cv, type, vecs, n_vecs, size);
+        return c_variant_insert_one(cv, type, vecs, n_vecs, false);
 }
 
 /**
