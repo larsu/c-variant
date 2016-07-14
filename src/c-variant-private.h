@@ -29,7 +29,6 @@
 typedef struct CVariantElement CVariantElement;
 typedef struct CVariantLevel CVariantLevel;
 typedef struct CVariantSignatureState CVariantSignatureState;
-typedef struct CVariantState CVariantState;
 typedef struct CVariantType CVariantType;
 typedef struct CVariantVarg CVariantVarg;
 typedef struct CVariantVargLevel CVariantVargLevel;
@@ -135,7 +134,7 @@ int c_variant_signature_next(const char *signature, size_t n_signature, CVariant
 int c_variant_signature_one(const char *signature, size_t n_signature, CVariantType *infop);
 
 /*
- * State Levels
+ * Levels
  */
 
 struct CVariantLevel {
@@ -155,16 +154,8 @@ struct CVariantLevel {
         const char *type;       /* current index into type */
 };
 
-struct CVariantState {
-        CVariantState *link;            /* parent/child state */
-        uint8_t i_levels;               /* current iterator level */
-        uint8_t n_levels;               /* number of allocated levels */
-        CVariantLevel levels[0];        /* level array */
-};
-
 void c_variant_level_root(CVariantLevel *level, size_t size, const char *type, size_t n_type);
 bool c_variant_on_root_level(CVariant *cv);
-int c_variant_ensure_level(CVariant *cv);
 void c_variant_push_level(CVariant *cv);
 void c_variant_pop_level(CVariant *cv);
 
@@ -172,13 +163,14 @@ void c_variant_pop_level(CVariant *cv);
  * Variants
  */
 
-#define C_VARIANT_MAX_INLINE_LEVELS (UINT8_MAX)
 #define C_VARIANT_MAX_VECS (UINT16_MAX)
 #define C_VARIANT_FRONT_SHARE (80)
 
 struct CVariant {
-        CVariantState *state;           /* current state */
-        CVariantState *unused;          /* unused state objects */
+        uint8_t i_levels;               /* current level */
+        uint8_t n_levels;               /* number of allocated levels */
+        CVariantLevel *levels;          /* level array */
+
         struct iovec *vecs;             /* iovecs backing the variant */
 
         uint16_t n_type;                /* initial type length */
@@ -193,7 +185,7 @@ int c_variant_alloc(CVariant **cvp,
                     char **typep,
                     void **extrap,
                     size_t n_type,
-                    size_t n_hint_levels,
+                    size_t n_levels,
                     size_t n_vecs,
                     size_t n_extra);
 void c_variant_dealloc(CVariant *cv);

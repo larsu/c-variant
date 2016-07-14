@@ -293,7 +293,7 @@ static int c_variant_peek(CVariant *cv,
                           size_t *sizep,
                           size_t *endp,
                           void **frontp) {
-        CVariantLevel *level = cv->state->levels + cv->state->i_levels;
+        CVariantLevel *level = cv->levels + cv->i_levels;
         size_t offset;
         int r;
 
@@ -423,17 +423,13 @@ static int c_variant_enter_one(CVariant *cv, char container) {
         size_t size, end;
         int r;
 
-        r = c_variant_ensure_level(cv);
-        if (r < 0)
-                return r;
-
         r = c_variant_peek(cv, container, &info, &size, &end, NULL);
         if (r < 0)
                 return r;
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         c_variant_push_level(cv);
-        next = cv->state->levels + cv->state->i_levels;
+        next = cv->levels + cv->i_levels;
 
         next->size = size;
         next->i_tail = level->i_front + size;
@@ -523,7 +519,7 @@ static int c_variant_exit_one(CVariant *cv) {
 }
 
 static int c_variant_exit_try(CVariant *cv, char container) {
-        if (container != cv->state->levels[cv->state->i_levels].enclosing)
+        if (container != cv->levels[cv->i_levels].enclosing)
                 return c_variant_poison(cv, -EBADRQC);
 
         return c_variant_exit_one(cv);
@@ -568,7 +564,7 @@ static int c_variant_read_one(CVariant *cv, char basic, void *arg) {
                 return c_variant_poison(cv, -EFAULT);
         }
 
-        c_variant_advance(cv, cv->state->levels + cv->state->i_levels, &info, end);
+        c_variant_advance(cv, cv->levels + cv->i_levels, &info, end);
         return 0;
 }
 
@@ -614,7 +610,7 @@ _public_ int c_variant_new_from_vecs(CVariant **cvp,
         if (r < 0)
                 return r;
 
-        r = c_variant_alloc(&cv, &p_type, NULL, n_type, info.n_levels + 8, n_vecs, 0);
+        r = c_variant_alloc(&cv, &p_type, NULL, n_type, info.n_levels + 1, n_vecs, 0);
         if (r < 0)
                 return r;
 
@@ -652,7 +648,7 @@ _public_ int c_variant_new_from_vecs(CVariant **cvp,
          * error-handling of GVariant, just as if it was a child of a
          * dynamic-sized object. Hence, we accept any size here.
          */
-        c_variant_level_root(cv->state->levels + cv->state->i_levels, size, p_type, n_type);
+        c_variant_level_root(cv->levels + cv->i_levels, size, p_type, n_type);
 
         *cvp = cv;
         return 0;
@@ -692,7 +688,7 @@ _public_ size_t c_variant_peek_count(CVariant *cv) {
 
         assert(cv->sealed);
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         switch (level->enclosing) {
         case C_VARIANT_ARRAY:
                 return level->index;
@@ -730,7 +726,7 @@ _public_ const char *c_variant_peek_type(CVariant *cv, size_t *sizep) {
 
         assert(cv->sealed);
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         *sizep = level->n_type;
         return level->type;
 }
@@ -787,7 +783,7 @@ _public_ int c_variant_enter(CVariant *cv, const char *containers) {
                         }
                 }
         } else {
-                level = cv->state->levels + cv->state->i_levels;
+                level = cv->levels + cv->i_levels;
                 if (level->n_type < 1)
                         return c_variant_poison(cv, -EBADRQC);
 
@@ -920,7 +916,7 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
         CVariant **arg_v;
         CVariant **arg_vs[C_VARIANT_MAX_VARG];
         size_t n_arg_vs = 0;
-        int r, c;
+        int r = 0, c;
 
         assert(cv && cv->sealed);
         assert(signature);
@@ -947,7 +943,7 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
                                 size_t size, end;
                                 void *data;
 
-                                level = cv->state->levels + cv->state->i_levels;
+                                level = cv->levels + cv->i_levels;
 
                                 r = c_variant_peek(cv, level->type[0], &info, &size, &end, NULL);
                                 if (r < 0)
@@ -1040,7 +1036,7 @@ _public_ void c_variant_rewind(CVariant *cv) {
         while (!c_variant_on_root_level(cv))
                 c_variant_exit_internal(cv);
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         c_variant_level_root(level,
                              level->size,
                              level->type + level->n_type - cv->n_type,

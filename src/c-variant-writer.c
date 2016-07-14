@@ -175,7 +175,7 @@ static int c_variant_reserve(CVariant *cv,
         /* both are mapped, hence cannot overflow size_t (with alignment) */
         assert(front_allocation + tail_allocation + 16 > front_allocation);
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         n_front = front_allocation + ALIGN_TO(level->offset, 1 << front_alignment) - level->offset;
         n_tail = tail_allocation + ALIGN_TO(level->i_tail, 1 << tail_alignment) - level->i_tail;
         vec_front = cv->vecs + level->v_front;
@@ -354,7 +354,7 @@ static int c_variant_append(CVariant *cv,
                             void **frontp,
                             size_t n_unaccounted_tail,
                             void **tailp) {
-        CVariantLevel *level = cv->state->levels + cv->state->i_levels;
+        CVariantLevel *level = cv->levels + cv->i_levels;
         bool need_frame = false;
         void *tail;
         int r;
@@ -432,16 +432,12 @@ static int c_variant_begin_one(CVariant *cv, char container, const char *variant
         void *tail;
         int r;
 
-        r = c_variant_ensure_level(cv);
-        if (r < 0)
-                return r;
-
         if (container == C_VARIANT_VARIANT)
                 n_tail = strlen(variant);
         else
                 n_tail = 0;
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         if (_unlikely_(level->n_type < 1))
                 return c_variant_poison(cv, -EBADRQC);
 
@@ -453,7 +449,7 @@ static int c_variant_begin_one(CVariant *cv, char container, const char *variant
                 return r;
 
         c_variant_push_level(cv);
-        next = cv->state->levels + cv->state->i_levels;
+        next = cv->levels + cv->i_levels;
 
         next->size = info.size;
         next->i_tail = level->i_tail;
@@ -502,7 +498,7 @@ static int c_variant_end_one(CVariant *cv) {
         if (_unlikely_(c_variant_on_root_level(cv)))
                 return c_variant_poison(cv, -EBADRQC);
 
-        prev = cv->state->levels + cv->state->i_levels;
+        prev = cv->levels + cv->i_levels;
         wz = c_variant_word_size(prev->offset, prev->index);
 
         switch (prev->enclosing) {
@@ -549,7 +545,7 @@ static int c_variant_end_one(CVariant *cv) {
         }
 
         c_variant_pop_level(cv);
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
 
         switch (prev->enclosing) {
         case C_VARIANT_VARIANT:
@@ -640,7 +636,7 @@ static int c_variant_end_one(CVariant *cv) {
 }
 
 static int c_variant_end_try(CVariant *cv, char container) {
-        if (container != cv->state->levels[cv->state->i_levels].enclosing)
+        if (container != cv->levels[cv->i_levels].enclosing)
                 return c_variant_poison(cv, -EBADRQC);
 
         return c_variant_end_one(cv);
@@ -654,7 +650,7 @@ static int c_variant_write_one(CVariant *cv, char basic, const void *arg, size_t
 
         assert(n_arg > 0);
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         if (_unlikely_(level->n_type < 1))
                 return c_variant_poison(cv, -EBADRQC);
 
@@ -685,7 +681,7 @@ static int c_variant_insert_one(CVariant *cv, const char *type, const struct iov
                 size += vecs[i].iov_len;
         }
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         if (_unlikely_(level->n_type < 1))
                 return c_variant_poison(cv, -EBADRQC);
 
@@ -787,7 +783,7 @@ _public_ int c_variant_new(CVariant **cvp, const char *type, size_t n_type) {
         /* allocate 2k as initial buffer, except if fixed size */
         size = info.size ?: ALIGN_TO(2048, 8);
 
-        r = c_variant_alloc(&cv, &p_type, &extra, n_type, info.n_levels + 8, 4, size);
+        r = c_variant_alloc(&cv, &p_type, &extra, n_type, info.n_levels + 1, 4, size);
         if (r < 0)
                 return r;
 
@@ -800,7 +796,7 @@ _public_ int c_variant_new(CVariant **cvp, const char *type, size_t n_type) {
         cv->vecs[cv->n_vecs - 1].iov_base = (char *)extra + cv->vecs[0].iov_len;
         cv->vecs[cv->n_vecs - 1].iov_len = size - cv->vecs[0].iov_len;
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
         level->size = info.size;
         level->i_tail = 0;
         level->v_tail = 0;
@@ -870,7 +866,7 @@ _public_ int c_variant_beginv(CVariant *cv, const char *containers, va_list args
                         }
                 }
         } else {
-                level = cv->state->levels + cv->state->i_levels;
+                level = cv->levels + cv->i_levels;
                 if (level->n_type < 1)
                         return c_variant_poison(cv, -EBADRQC);
 
@@ -1197,7 +1193,7 @@ _public_ int c_variant_seal(CVariant *cv) {
                         return r;
         }
 
-        level = cv->state->levels + cv->state->i_levels;
+        level = cv->levels + cv->i_levels;
 
         /* clip trailing vector */
         cv->vecs[level->v_front].iov_len = level->i_front;

@@ -534,53 +534,6 @@ int c_variant_signature_one(const char *signature, size_t n_signature, CVariantT
 }
 
 /*
- * State
- * =====
- *
- * XXX
- */
-
-static int c_variant_state_new(CVariantState **statep,
-                               void **extrap,
-                               size_t n_extra,
-                               size_t n_hint_levels) {
-        size_t size, off_extra;
-        CVariantState *state;
-
-        static_assert(__alignof(CVariantState) <= 8, "Invalid CVariantState alignment");
-
-        /* state->levels[state->i_levels] better always works! */
-        n_hint_levels = (n_hint_levels < 1) ? 1 :
-                        (n_hint_levels > C_VARIANT_MAX_INLINE_LEVELS) ?
-                                        C_VARIANT_MAX_INLINE_LEVELS :
-                                        n_hint_levels;
-
-        /* space for: state-object and appended level-array (auto-align) */
-        size = offsetof(CVariantState, levels);
-        size += sizeof(*state->levels) * n_hint_levels;
-
-        /* space for: extra buffer, if any (8-byte aligned) */
-        off_extra = ALIGN_TO(size, 8);
-        size = off_extra + n_extra;
-
-        state = malloc(size);
-        if (!state)
-                return -ENOMEM;
-
-        /* malloc() better is 8-byte aligned, always! */
-        assert(state == ALIGN_PTR_TO(state, 8));
-
-        state->link = NULL;
-        state->i_levels = 0;
-        state->n_levels = n_hint_levels;
-
-        *statep = state;
-        if (extrap)
-                *extrap = (char *)state + off_extra;
-        return 0;
-}
-
-/*
  * Variants
  * ========
  *
@@ -591,18 +544,16 @@ int c_variant_alloc(CVariant **cvp,
                     char **typep,
                     void **extrap,
                     size_t n_type,
-                    size_t n_hint_levels,
+                    size_t n_levels,
                     size_t n_vecs,
                     size_t n_extra) {
-        CVariantState *state;
         CVariant *cv;
         size_t size;
-        int r;
 
         /*
          * Allocate a new CVariant, including:
          *  - uninitialized buffer for type, returned in @typep
-         *  - state object with levels pre-allocated
+         *  - levels
          *  - set of _uninitialized_ iovecs (@n_vecs)
          *  - trailing, 8-byte aligned, extra data, returned in @extrap
          *
@@ -614,8 +565,6 @@ int c_variant_alloc(CVariant **cvp,
         static_assert(__alignof(CVariant) <= 8, "Invalid CVariant alignment");
         static_assert((1ULL << (8 * sizeof(((CVariant *)0)->n_type))) > C_VARIANT_MAX_SIGNATURE,
                       "Invalid maximum signature length");
-        static_assert((1ULL << (8 * sizeof(((CVariantState *)0)->i_levels))) > C_VARIANT_MAX_LEVEL,
-                      "Invalid maximum depth level");
         static_assert((1ULL << (8 * sizeof(((CVariant *)0)->n_vecs))) > C_VARIANT_MAX_VECS,
                       "Invalid maximum number of iovecs");
 
@@ -626,15 +575,11 @@ int c_variant_alloc(CVariant **cvp,
         size += sizeof(struct iovec) * n_vecs + n_vecs;
         size += n_type;
         size = ALIGN_TO(size, 8);
-        r = c_variant_state_new(&state,
-                                (void **)&cv,
-                                size + n_extra,
-                                n_hint_levels);
-        if (r < 0)
-                return r;
 
-        cv->state = state;
-        cv->unused = NULL;
+        cv = malloc(size + n_extra);
+        cv->i_levels = 0;
+        cv->n_levels = n_levels;
+        cv->levels = calloc(n_levels, sizeof(CVariantLevel));
         cv->vecs = ALIGN_PTR_TO(cv + 1, __alignof(struct iovec));
         cv->n_type = n_type;
         cv->n_vecs = n_vecs;
@@ -654,20 +599,9 @@ int c_variant_alloc(CVariant **cvp,
 }
 
 void c_variant_dealloc(CVariant *cv) {
-        CVariantState *state;
         size_t i;
 
-        /* pop all cached, unused states (they're never static) */
-        while ((state = cv->unused)) {
-                cv->unused = state->link;
-                free(state);
-        }
-
-        /* pop anything but the initial state (which is static) */
-        while ((state = cv->state->link)) {
-                free(cv->state);
-                cv->state = state;
-        }
+        free(cv->levels);
 
         /*
          * Free data, but align first as we might have screwed with the base
@@ -681,8 +615,7 @@ void c_variant_dealloc(CVariant *cv) {
         if (cv->allocated_vecs)
                 free(cv->vecs);
 
-        /* @cv is embedded in the root-state @cv->state */
-        free(cv->state);
+        free(cv);
 }
 
 int c_variant_poison_internal(CVariant *cv, int poison) {
@@ -699,67 +632,31 @@ int c_variant_poison_internal(CVariant *cv, int poison) {
 }
 
 bool c_variant_on_root_level(CVariant *cv) {
-        /* 'true' if there is NO parent level */
-        return cv->state->i_levels == 0 && !cv->state->link;
-}
-
-int c_variant_ensure_level(CVariant *cv) {
-        int r;
-
-        if (_likely_(cv->state->i_levels + 1 < cv->state->n_levels || cv->unused))
-                return 0;
-
-        /* allocate new state with fixed 16 levels */
-        r = c_variant_state_new(&cv->unused, NULL, 0, 16);
-        if (r < 0)
-                return c_variant_poison(cv, -ENOMEM);
-
-        return 0;
+        return cv->i_levels == 0;
 }
 
 void c_variant_push_level(CVariant *cv) {
-        CVariantState *state;
-
         /*
          * Enter a new level on top of the current one. The state of the new
-         * level is undefined and needs to be initialized by the caller. The
-         * caller must guarantee that there is at least one more level
-         * allocated. Use c_variant_ensure_level() to pre-allocate levels.
+         * level is undefined and needs to be initialized by the caller.
+         * It is an error to push more levels than the maximim nesting
+         * depth of cv's type plus one.
          */
 
-        if (_likely_(cv->state->i_levels + 1 < cv->state->n_levels)) {
-                ++cv->state->i_levels;
-        } else {
-                assert(cv->unused);
+        cv->i_levels += 1;
 
-                state = cv->unused;
-                cv->unused = state->link;
-                state->link = cv->state;
-                cv->state = state;
-
-                /* reset state */
-                state->i_levels = 0;
-        }
+        assert(cv->i_levels < cv->n_levels);
 }
 
 void c_variant_pop_level(CVariant *cv) {
-        CVariantState *state;
-
         /*
          * Exit the current level by discarding all its cached state and
          * returning to the parent level.
          */
 
-        if (_likely_(cv->state->i_levels > 0)) {
-                --cv->state->i_levels;
-        } else {
-                assert(cv->state->link);
+        assert(cv->i_levels > 0);
 
-                state = cv->state->link;
-                cv->state->link = cv->unused;
-                cv->unused = cv->state;
-                cv->state = state;
-        }
+        cv->i_levels -= 1;
 }
 
 /*
@@ -850,7 +747,7 @@ void c_variant_varg_push(CVariantVarg *varg, const char *type, size_t n_type, si
 
 void c_variant_varg_enter_bound(CVariantVarg *varg, CVariant *cv, size_t n_array) {
         CVariantVargLevel *vlevel = &varg->levels[varg->i_levels];
-        CVariantLevel *level = cv->state->levels + cv->state->i_levels;
+        CVariantLevel *level = cv->levels + cv->i_levels;
 
         /* callers better know the type before accessing it */
         assert(vlevel->n_type >= level->n_type);
@@ -865,7 +762,7 @@ void c_variant_varg_enter_bound(CVariantVarg *varg, CVariant *cv, size_t n_array
 
 void c_variant_varg_enter_unbound(CVariantVarg *varg, CVariant *cv, char closing) {
         CVariantVargLevel *vlevel = &varg->levels[varg->i_levels];
-        CVariantLevel *level = cv->state->levels + cv->state->i_levels;
+        CVariantLevel *level = cv->levels + cv->i_levels;
 
         /* callers better know the type before accessing it */
         assert(vlevel->n_type >= level->n_type + 1U);
