@@ -48,8 +48,6 @@ static void test_reader_basic(void) {
 
         c_variant_rewind(cv);
 
-        r = c_variant_read(cv, NULL);
-        assert(r >= 0);
         r = c_variant_read(cv, "");
         assert(r >= 0);
 

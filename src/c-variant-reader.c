@@ -856,98 +856,6 @@ _public_ int c_variant_exit(CVariant *cv, const char *containers) {
         return 0;
 }
 
-static void c_variant_read_one_default(char basic, void *arg) {
-        size_t size;
-
-        static_assert(sizeof(double) == 8, "Unsupported 'double' type");
-
-        if (!arg)
-                return;
-
-        size = 1;
-        switch (basic) {
-        case C_VARIANT_INT64:
-        case C_VARIANT_UINT64:
-        case C_VARIANT_DOUBLE:
-                size *= 2; /* fallthrough */
-        case C_VARIANT_INT32:
-        case C_VARIANT_UINT32:
-        case C_VARIANT_HANDLE:
-                size *= 2; /* fallthrough */
-        case C_VARIANT_INT16:
-        case C_VARIANT_UINT16:
-                size *= 2; /* fallthrough */
-        case C_VARIANT_BOOL:
-        case C_VARIANT_BYTE:
-                memset(arg, 0, size);
-                break;
-        case C_VARIANT_STRING:
-        case C_VARIANT_PATH:
-        case C_VARIANT_SIGNATURE:
-                *(const char **)arg = "";
-                break;
-        default:
-                assert(0);
-                break;
-        }
-}
-
-static void c_variant_readv_default(CVariantVarg *varg, int c, va_list args) {
-        const char *arg_s;
-        void *arg;
-        int arg_i;
-
-        /*
-         * This is the fallback readv() implementation. It does not require
-         * access to any variant, but rather just fills in default values for
-         * all requested elements. This makes sure that even if readv() fails,
-         * all output variables will have a valid value.
-         */
-
-        static_assert(sizeof(double) == 8, "Unsupported 'double' type");
-
-        for ( ; c; c = c_variant_varg_next(varg)) {
-                switch (c) {
-                case -1: /* level done, nothing to do */
-                        break;
-                case C_VARIANT_INT64:
-                case C_VARIANT_UINT64:
-                case C_VARIANT_DOUBLE:
-                case C_VARIANT_INT32:
-                case C_VARIANT_UINT32:
-                case C_VARIANT_HANDLE:
-                case C_VARIANT_INT16:
-                case C_VARIANT_UINT16:
-                case C_VARIANT_BOOL:
-                case C_VARIANT_BYTE:
-                case C_VARIANT_STRING:
-                case C_VARIANT_PATH:
-                case C_VARIANT_SIGNATURE:
-                        arg = va_arg(args, void *);
-                        c_variant_read_one_default(c, arg);
-                        break;
-                case C_VARIANT_VARIANT:
-                        arg_s = va_arg(args, const char *);
-                        if (arg_s)
-                                c_variant_varg_push(varg, arg_s, strlen(arg_s), -1);
-                        break;
-                case C_VARIANT_MAYBE:
-                case C_VARIANT_ARRAY:
-                        /* bool in varargs becomes int */
-                        arg_i = va_arg(args, int);
-                        c_variant_varg_enter_default(varg, true, arg_i);
-                        break;
-                case C_VARIANT_TUPLE_OPEN:
-                case C_VARIANT_PAIR_OPEN:
-                        c_variant_varg_enter_default(varg, false, -1);
-                        break;
-                default:
-                        assert(0);
-                        break;
-                }
-        }
-}
-
 /**
  * c_variant_readv() - read data from variant
  * @cv:         variant to operate on, or NULL
@@ -985,12 +893,6 @@ static void c_variant_readv_default(CVariantVarg *varg, int c, va_list args) {
  *                Their values and then read recursively, according to their
  *                type.
  *
- * Whenever you specify a type that does *NOT* match the actual type of the
- * variant, an error will be returned. However, any remaining types in @args
- * (according to the data provided in @signature) are read as their default
- * values. That is, even if this function fails, all output arguments will have
- * *some* valid data!
- *
  * Example:
  *      unsigned int u1, u2, u3, u4;
  *      const char *key1, *key2;
@@ -1007,7 +909,8 @@ static void c_variant_readv_default(CVariantVarg *varg, int c, va_list args) {
  *                         "u",         // type of 'v' of second array entry
  *                         &u4);        // read 'u' of second array entry
  *
- * It is an programming error to call this on an unsealed variant.
+ * It is an programming error to call this on an unsealed variant or
+ * with a @signature that does not match the type of @cv.
  *
  * Return: 0 on success, negative error code on failure.
  */
@@ -1018,19 +921,13 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
         int arg_i;
         int r, c;
 
-        if (_unlikely_(!signature || !*signature))
+        assert(cv && cv->sealed);
+        assert(signature);
+
+        if (_unlikely_(!*signature))
                 return 0;
 
         c = c_variant_varg_init(&varg, signature, strlen(signature));
-
-        if (_unlikely_(!cv)) {
-                if (!strcmp(signature, "()"))
-                        return 0;
-                c_variant_readv_default(&varg, c, args);
-                return -EBADRQC;
-        }
-
-        assert(cv->sealed);
 
         for ( ; c; c = c_variant_varg_next(&varg)) {
                 switch (c) {
@@ -1039,10 +936,8 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
                         break;
                 case C_VARIANT_VARIANT:
                         r = c_variant_enter_one(cv, c);
-                        if (r < 0) {
-                                c_variant_readv_default(&varg, c, args);
+                        if (r < 0)
                                 return r;
-                        }
 
                         arg_s = va_arg(args, const char *);
                         if (arg_s)
@@ -1053,10 +948,8 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
                 case C_VARIANT_MAYBE:
                 case C_VARIANT_ARRAY:
                         r = c_variant_enter_one(cv, c);
-                        if (r < 0) {
-                                c_variant_readv_default(&varg, c, args);
+                        if (r < 0)
                                 return r;
-                        }
 
                         /* bool in varargs becomes int */
                         arg_i = va_arg(args, int);
@@ -1065,10 +958,8 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
                 case C_VARIANT_TUPLE_OPEN:
                 case C_VARIANT_PAIR_OPEN:
                         r = c_variant_enter_one(cv, c);
-                        if (r < 0) {
-                                c_variant_readv_default(&varg, c, args);
+                        if (r < 0)
                                 return r;
-                        }
 
                         if (c == C_VARIANT_TUPLE_OPEN)
                                 c_variant_varg_enter_unbound(&varg, cv, C_VARIANT_TUPLE_CLOSE);
@@ -1090,11 +981,8 @@ _public_ int c_variant_readv(CVariant *cv, const char *signature, va_list args) 
                 case C_VARIANT_SIGNATURE:
                         arg = va_arg(args, void *);
                         r = c_variant_read_one(cv, c, arg);
-                        if (r < 0) {
-                                c_variant_read_one_default(c, arg);
-                                c_variant_readv_default(&varg, c_variant_varg_next(&varg), args);
+                        if (r < 0)
                                 return r;
-                        }
                         break;
                 default:
                         return c_variant_poison(cv, -EMEDIUMTYPE);
