@@ -409,6 +409,11 @@ int c_variant_signature_next(const char *signature, size_t n_signature, CVariant
                         is_leaf = true;
                         break;
 
+                case C_VARIANT_VARIANT:
+                        if (level + 1 > known_level)
+                                known_level += 1;
+                        /* fall through */
+
                 case C_VARIANT_BOOL:
                 case C_VARIANT_BYTE:
                 case C_VARIANT_INT16:
@@ -422,7 +427,6 @@ int c_variant_signature_next(const char *signature, size_t n_signature, CVariant
                 case C_VARIANT_STRING:
                 case C_VARIANT_PATH:
                 case C_VARIANT_SIGNATURE:
-                case C_VARIANT_VARIANT:
                         /* verify pairs are filled correctly */
                         if (_unlikely_(end_of_pair))
                                 return -EMEDIUMTYPE;
